@@ -112,7 +112,7 @@ def _build_prompt(events: list[dict]) -> str:
 def assess_events(events: list[dict]) -> list[dict]:
     client = anthropic.Anthropic()
     response = client.messages.parse(
-        model="claude-haiku-4-5",
+        model="claude-sonnet-4-6",
         max_tokens=4096 * 2,
         messages=[{"role": "user", "content": _build_prompt(events)}],
         output_format=list[Assessment],
@@ -198,7 +198,7 @@ def _format_event_block(events: list[dict]) -> str:
             lines.append(f"\n── {month} ──")
             current_month = month
         loc = f"  📍 {e['location']}" if e["location"] else ""
-        lines.append(f"  {e['date'].strftime('%a %d')}  {e['time']}–{e['end_time']}  {e['title']}{loc}")
+        lines.append(f"  {e['date'].strftime('%a %d')}  {e['time']}–{e['end_time']}  {e['title']} ({e['conflict_score'] * 100:.0f}%) {loc}")
         lines.append(f"         → {e['reason']}")
     return "\n".join(lines)
 
