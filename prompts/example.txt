@@ -1,0 +1,32 @@
+You are checking whether calendar events would prevent me from playing a gig with a band. 
+
+Rules: 
+- Gigs typically start at 18:00, usually on thursday, friday, or saturday. 
+- Calender events can sometimes be cancelled; e.g. gym and sports things can be cancelled
+- Some events don't really need me to be anywhere; e.g. a birthday 
+
+Output: 
+- For all the events, give me a likelihood between 0 and 1 that it will prevent me from playing a gig. 
+- Return JSON-parsable output (not Markdown), in the form [{"id": 1, "conflict_score": 0.5, "reason": "this might be a problem because XYZ"}]
+- Return only events with score above 0.5
+Events:
+1. [Sat 27 Jun 2026] 18:00–00:00: "BOEKING Gig HvA" at De Heeren Van Aemstel, Thorbeckeplein 5, 1017 CS Amsterdam, Netherlands
+2. [Sun 28 Jun 2026] 00:00–00:00: "Floris de Laat is jarig!"
+3. [Sun 28 Jun 2026] 11:30–12:30: "Circuit Training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+4. [Mon 29 Jun 2026] 08:00–09:00: "Run"
+5. [Mon 29 Jun 2026] 10:30–11:30: "Barbara"
+6. [Tue 30 Jun 2026] 18:00–19:00: "Strength training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+7. [Wed 01 Jul 2026] 19:00–20:00: "Tennisles"
+8. [Thu 02 Jul 2026] 13:00–14:00: "Run"
+9. [Sat 04 Jul 2026] 09:30–10:30: "Fietsen"
+10. [Sun 05 Jul 2026] 11:30–12:30: "Circuit Training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+11. [Mon 06 Jul 2026] 08:00–09:00: "Run"
+12. [Mon 06 Jul 2026] 10:30–11:30: "Barbara"
+13. [Tue 07 Jul 2026] 18:00–19:00: "Strength training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+14. [Wed 08 Jul 2026] 19:00–20:00: "Tennisles"
+15. [Sat 11 Jul 2026] 09:30–10:30: "Fietsen"
+16. [Sun 12 Jul 2026] 11:30–12:30: "Circuit Training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+17. [Mon 13 Jul 2026] 08:00–09:00: "Run"
+18. [Mon 13 Jul 2026] 10:30–11:30: "Barbara"
+19. [Tue 14 Jul 2026] 18:00–19:00: "Strength training" at The Body Studio Zuid, Heemstedestraat 12, 1058 NM Amsterdam, Nederland
+20. [Wed 15 Jul 2026] 19:00–20:00: "Tennisles"

@@ -1,0 +1,15 @@
+You are checking whether calendar events would prevent me from playing a gig with a band. 
+
+Rules: 
+- Gigs typically start at 18:00, usually on thursday, friday, or saturday. 
+- Calender events can sometimes be cancelled; e.g. gym and sports things can be cancelled
+- Some events don't really need me to be anywhere; e.g. a birthday 
+- Some events are already related to the band (e.g., band rehearsal, CASSETTE GIG, CASSETTE BOEKING, CASSETTE OPTIE); these can be ignored
+
+Output: 
+- For all the events, give me a likelihood between 0 and 1 that it will prevent me from playing a gig. 
+- Return JSON-parsable output (not Markdown), in the form [{"id": 1, "conflict_score": 0.5, "reason": "this might be a problem because XYZ"}]
+- Return only events with score above 0.2
+
+Events:
+<<EVENTS>>
