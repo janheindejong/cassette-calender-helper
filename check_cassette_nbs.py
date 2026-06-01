@@ -2,9 +2,11 @@ import base64
 import dataclasses
 import datetime
 from email.message import EmailMessage
-from enum import Enum
+from enum import Enum, auto
+import itertools
 import logging
 import os
+from typing import Generator
 import zoneinfo
 
 import anthropic
@@ -23,6 +25,8 @@ CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
 SUMMARY_RECIPIENT = "janhein.dejong@gmail.com"
 CLAUDE_MODEL = "claude-sonnet-4-6"
+MEDIUM_NBS_THRESHOLD = 0.2
+HIGH_NBS_THRESHOLD = 0.5
 
 # Fixed configuration 
 CASSETTE_CALENDAR_NAME = "Cassette Band Intern"
@@ -30,29 +34,20 @@ NBS_MARKER = "JH NBS"
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.send"]
 
 
+# ── Logging ────────────────────────────────────────────────────────────
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger.setLevel(logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ── Google Calendar ────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────
 
-class AlreadyFlaggedWithNBS:
+class BelowThreshold:
     pass 
 
 
-class OmittedFromAssessmentOutput: 
-    pass
-
-
-class NbsIssueSeverity(Enum):
-    UNKNOWN = -2
-    ALREADY_FLAGGED = -1
-    LOW = 0
-    MEDIUM = 1
-    HIGH = 2
-
-
 @dataclasses.dataclass
-class PossibleNBS: 
+class NbsAssessment: 
     score: float 
     reason: str 
 
@@ -64,26 +59,33 @@ class CalendarEvent:
     end: datetime.datetime
     summary: str 
     location: str | None = None
-    nbs_state: None | AlreadyFlaggedWithNBS | OmittedFromAssessmentOutput | PossibleNBS = None
+    flagged_nbs: bool | None = None
+    nbs_assessment: None | BelowThreshold | NbsAssessment = None
 
-    @property
-    def conflict_severity(self) -> NbsIssueSeverity:
-        match self.nbs_state:
-            case AlreadyFlaggedWithNBS():
-                return NbsIssueSeverity.ALREADY_FLAGGED
-            case PossibleNBS(score=score) if score >= 0.5:
-                return NbsIssueSeverity.HIGH
-            case PossibleNBS(score=score) if score >= 0.2:
-                return NbsIssueSeverity.MEDIUM
-            case PossibleNBS(score=score):
-                return NbsIssueSeverity.LOW
-            case OmittedFromAssessmentOutput():
-                return NbsIssueSeverity.LOW
-            case None:
-                return NbsIssueSeverity.UNKNOWN
-            case _:
-                logger.warning(f"Unknown nbs_state for event {self.id}: {self.nbs_state}; {dataclasses.asdict(self)}")
-                return NbsIssueSeverity.UNKNOWN
+    def is_covered_by_nbs(self, nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]]) -> bool:
+        return any(self.start < nb_end and self.end > nb_start for nb_start, nb_end in nbs_intervals)
+    
+    def with_flag_updated(self, nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]]) -> "CalendarEvent":
+        return dataclasses.replace(self, flagged_nbs=self.is_covered_by_nbs(nbs_intervals))
+
+# @property
+#     def conflict_severity(self) -> NbsIssueSeverity:
+#         match self.nbs_state:
+#             case AlreadyFlaggedWithNBS():
+#                 return NbsIssueSeverity.ALREADY_FLAGGED
+#             case PossibleNBS(score=score) if score >= 0.5:
+#                 return NbsIssueSeverity.HIGH
+#             case PossibleNBS(score=score) if score >= 0.2:
+#                 return NbsIssueSeverity.MEDIUM
+#             case PossibleNBS(score=score):
+#                 return NbsIssueSeverity.LOW
+#             case OmittedFromAssessmentOutput():
+#                 return NbsIssueSeverity.LOW
+#             case None:
+#                 return NbsIssueSeverity.UNKNOWN
+#             case _:
+#                 logger.warning(f"Unknown nbs_state for event {self.id}: {self.nbs_state}; {dataclasses.asdict(self)}")
+#                 return NbsIssueSeverity.UNKNOWN
 
 # ── Google Calender ──────────────────────────────────────────────────────────────
 
@@ -151,22 +153,21 @@ def fetch_events(service, calendar_id: str, start: datetime.datetime, end: datet
 
 # ── Event helpers ──────────────────────────────────────────────────────────────
 
-def is_covered(event: CalendarEvent, nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]]) -> bool:
-    return any(event.start < nb_end and event.end > nb_start for nb_start, nb_end in nbs_intervals)
 
-def group_events_by_level(events: list[CalendarEvent]) -> dict[NbsIssueSeverity, list[CalendarEvent]]:
-    grouped = {level: [] for level in NbsIssueSeverity}
-    for event in events:
-        if isinstance(event.nbs_state, PossibleNBS):
-            match event.nbs_state.score:
-                case score if score >= NbsIssueSeverity.HIGH.value:
-                    level = NbsIssueSeverity.HIGH
-                case score if score >= NbsIssueSeverity.MEDIUM.value:
-                    level = NbsIssueSeverity.MEDIUM
-                case _:
-                    level = NbsIssueSeverity.LOW
-            grouped[level].append(event)
-    return grouped
+
+# def group_events_by_level(events: list[CalendarEvent]) -> dict[NbsIssueSeverity, list[CalendarEvent]]:
+#     grouped = {level: [] for level in NbsIssueSeverity}
+#     for event in events:
+#         if isinstance(event.nbs, PossibleNBS):
+#             match event.nbs.score:
+#                 case score if score >= NbsIssueSeverity.HIGH.value:
+#                     level = NbsIssueSeverity.HIGH
+#                 case score if score >= NbsIssueSeverity.MEDIUM.value:
+#                     level = NbsIssueSeverity.MEDIUM
+#                 case _:
+#                     level = NbsIssueSeverity.LOW
+#             grouped[level].append(event)
+#     return grouped
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ def _build_prompt(events: list[CalendarEvent]) -> str:
         return f.read().replace("<<EVENTS>>", "\n".join(event_lines))
 
 
-def assess_events(events: list[CalendarEvent]) -> None:
+def assess_events_with_llm(events: list[CalendarEvent]) -> None:
     client = anthropic.Anthropic()
     prompt = _build_prompt(events)
     logger.debug(prompt)
@@ -204,94 +205,101 @@ def assess_events(events: list[CalendarEvent]) -> None:
     assessment_map = {a.id: a for a in assessments}
     for e in events:
         a = assessment_map.get(e.id)
-        e.nbs_state = PossibleNBS(score=a.conflict_score, reason=a.reason) if a else OmittedFromAssessmentOutput()
+        e.nbs_assessment = NbsAssessment(score=a.conflict_score, reason=a.reason) if a else BelowThreshold()
 
 
-# ── Console print helpers ─────────────────────────────────────────────────────────────
+# ── Classification ─────────────────────────────────────────────────────────────
+class NbsGroup(Enum):
+    HIGH = auto()         # 🔴
+    MEDIUM = auto()       # 🟡
+    LOW = auto()          # 🟢
+    COVERED = auto()      # 🔵
+    UNKNOWN = auto()      # ⚪
 
-def display_event(item: CalendarEvent) -> None:
-    match item.nbs_state:
-        case AlreadyFlaggedWithNBS():
-            conflict_badge = "🔵"
-            conflict_str = "Already flagged with NBS"
-        case PossibleNBS(score=score, reason=reason) if score >= NbsIssueSeverity.HIGH.value:
-            conflict_badge = "🔴"
-            conflict_str = f"{reason} ({score:.0%})"
-        case PossibleNBS(score=score, reason=reason) if score >= NbsIssueSeverity.MEDIUM.value:
-            conflict_badge = "🟡"
-            conflict_str = f"{reason} ({score:.0%})"
-        case PossibleNBS(score=score, reason=reason) if score < NbsIssueSeverity.MEDIUM.value:
-            conflict_badge = "🟢"
-            conflict_str = f"{reason} ({score:.0%})"
-        case OmittedFromAssessmentOutput():
-            conflict_badge = "🟢"
-            conflict_str = "Low probability conflict"
+
+@dataclasses.dataclass
+class ClassifiedEvent:
+    event: CalendarEvent
+    group: NbsGroup
+    badge: str
+    conflict_str: str
+
+
+def classify_event(item: CalendarEvent) -> ClassifiedEvent:
+    if item.flagged_nbs:
+        return ClassifiedEvent(item, NbsGroup.COVERED, "🔵", "Covered by NBS")
+    match item.nbs_assessment:
+        case NbsAssessment(score=score, reason=reason) if score >= HIGH_NBS_THRESHOLD:
+            return ClassifiedEvent(item, NbsGroup.HIGH, "🔴", f"{reason} ({score:.0%})")
+        case NbsAssessment(score=score, reason=reason) if score >= MEDIUM_NBS_THRESHOLD:
+            return ClassifiedEvent(item, NbsGroup.MEDIUM, "🟡", f"{reason} ({score:.0%})")
+        case NbsAssessment(score=score, reason=reason):
+            return ClassifiedEvent(item, NbsGroup.LOW, "🟢", f"{reason} ({score:.0%})")
+        case BelowThreshold():
+            return ClassifiedEvent(item, NbsGroup.LOW, "🟢", f"(<{MEDIUM_NBS_THRESHOLD:.0%})")
         case _:
-            logger.warning(f"Unknown conflict type for event {item.id}: {item.nbs_state}; {dataclasses.asdict(item)}")
-            conflict_badge = "⚪"
-            conflict_str = "Unknown conflict status"
-    location_str = f"📍 {item.location}" if item.location else ""
+            logger.warning(...)
+            return ClassifiedEvent(item, NbsGroup.UNKNOWN, "⚪", "Unknown conflict status")
+
+
+def classify_events(items: list[CalendarEvent]) -> list[ClassifiedEvent]:
+    return [classify_event(e) for e in items]
+
+
+def sort_events(events: list[ClassifiedEvent]) -> list[ClassifiedEvent]:
+    return sorted(
+        events,
+        key=lambda c: (c.group.value, c.event.start),
+    )
+
+# ── Presentation ─────────────────────────────────────────────────────────────
+def summary_strings(events: list[ClassifiedEvent]) -> list[str]:
+    today = datetime.date.today().strftime("%d %b %Y")
+    body_parts = [
+        f"Gig conflict audit — {today}",
+        f"",
+        f"Events: {len(events)}",
+        f"🔴  High probability conflicts: {len([e for e in events if e.group is NbsGroup.HIGH])}",
+        f"🟡  Medium probability conflicts: {len([e for e in events if e.group is NbsGroup.MEDIUM])}",
+        f"🟢  Low probability conflicts: {len([e for e in events if e.group is NbsGroup.LOW])}",
+        f"🔵  Covered by NBS: {len([e for e in events if e.group is NbsGroup.COVERED])}",
+        f"⚪  Unknown: {len([e for e in events if e.group is NbsGroup.UNKNOWN])}",
+    ]
+    return body_parts
+
+
+def event_string(classified: ClassifiedEvent) -> str:
+    item = classified.event
+    location_str = f" - 📍 {item.location}" if item.location else ""
     same_day = item.start.date() == item.end.date()
     if same_day:
         time_str = f"{item.start:%a %d %b %Y} {item.start:%H:%M}–{item.end:%H:%M}"
     else:
         time_str = f"{item.start:%a %d %b %Y} {item.start:%H:%M} – {item.end:%a %d %b %Y} {item.end:%H:%M}"
-    print(f"{conflict_badge} {time_str} {item.summary} {location_str} {conflict_str}")
+    return f"{classified.badge} {time_str} - {item.summary.strip()}{location_str} - {classified.conflict_str}"
+
+
+def event_strings(events: list[ClassifiedEvent]) -> list[str]:
+    return [event_string(e) for e in events]
 
 
 # ── Gmail ──────────────────────────────────────────────────────────────
+def send_summary(
+    gmail,
+    to: str,
+    body_parts: list[str],
+    subject: str,
+) -> None:
+    msg = EmailMessage()
+    msg["To"] = to
+    msg["From"] = to
+    msg["Subject"] = subject
+    msg.set_content("\n".join(body_parts))
+ 
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+    print(f"📧 Summary sent to {to}")
 
-# def send_summary(
-#     gmail,
-#     to: str,
-#     n_total: int,
-#     n_covered: int,
-#     potential_conflicts: list[dict],
-#     unlikely_conflicts: list[dict],
-# ) -> None:
-#     today = datetime.date.today().strftime("%d %b %Y")
-#     subject = f"Gig conflict audit — {today}"
- 
-#     body_parts = [
-#         f"Gig conflict audit — {today}",
-#         f"",
-#         f"Personal events: {n_total}",
-#         f"Covered by NBS: {n_covered}",
-#         f"Assessed: {len(potential_conflicts) + len(unlikely_conflicts)}",
-#         f"🔴  Potential conflicts: {len(potential_conflicts)}",
-#         f"🟡  Unlikely conflicts: {len(unlikely_conflicts)}",
-#     ]
- 
-#     if potential_conflicts:
-#         body_parts += ["\n<b>🔴 POTENTIAL GIG CONFLICTS</b>", _format_event_block(potential_conflicts)]
-#     else:
-#         body_parts.append("\n✅ No potential conflicts — all uncovered events look fine.")
- 
-#     if unlikely_conflicts:
-#         body_parts += [f"\n<b>🟡 Unlikely conflicts ({len(unlikely_conflicts)} events)</b>", _format_event_block(unlikely_conflicts)]
- 
-#     msg = EmailMessage()
-#     msg["To"] = to
-#     msg["From"] = to
-#     msg["Subject"] = subject
-#     msg.set_content("\n".join(body_parts))
- 
-#     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-#     gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
-#     print(f"📧 Summary sent to {to}")
-
-# def _format_event_block(events: list[dict]) -> str:
-#     lines = []
-#     current_month = None
-#     for e in sorted(events, key=lambda x: x["date"]):
-#         month = e["date"].strftime("%B %Y")
-#         if month != current_month:
-#             lines.append(f"\n── {month} ──")
-#             current_month = month
-#         loc = f"  📍 {e['location']}" if e["location"] else ""
-#         lines.append(f"  {e['date'].strftime('%a %d')}  {e['time']}–{e['end_time']}  {e['title']} ({e['conflict_score'] * 100:.0f}%) {loc}")
-#         lines.append(f"         → {e['reason']}")
-#     return "\n".join(lines)
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
@@ -310,43 +318,30 @@ def main() -> None:
             print(f"  - {cal.get('summary')}")
         return
 
-    personal_events = fetch_events(service, "primary", now, horizon)
+    # Fetch events 
+    events = fetch_events(service, "primary", now, horizon)
+
+    # Check against NBS intervals
     cassette_events = fetch_events(service, cassette_id, now, horizon)
-
-    # Build NBS intervals for overlap checking
     nbs_intervals = [(e.start, e.end) for e in cassette_events if e.summary.lower().strip() == NBS_MARKER.lower().strip()]
-    uncovered = [e for e in personal_events if not is_covered(e, nbs_intervals)]
-    covered = [e for e in personal_events if e not in uncovered]
-    for e in covered:
-        e.nbs_state = AlreadyFlaggedWithNBS()
+    events = [e.with_flag_updated(nbs_intervals) for e in events]
 
-    if not uncovered:
-        print("✅ All personal events already covered by a JH NBS entry.")
-        return
+    # Assess uncovered events with LLM
+    assess_events_with_llm([e for e in events if not e.flagged_nbs])
 
-    print(f"🤖 Assessing {len(uncovered)} uncovered event(s)...\n")
-    assess_events(uncovered)
+    # Classify and sort 
+    classified_events = classify_events(events)
+    sorted_events = sort_events(classified_events)
 
-    for item in personal_events:
-        display_event(item)
+    # Create output lines 
+    lines = summary_strings(sorted_events) + [""] + event_strings(sorted_events)
 
-    # print(f"{'═' * 52}")
-    # print(f"  Gig conflict audit")
-    # print(f"  Personal events         : {len(personal_events)}")
-    # print(f"  Covered by NBS          : {covered_count}")
-    # print(f"  Assessed by Claude      : {len(uncovered)}")
-    # # print(f"  🔴  Above 50%            : {len(potential_conflicts)}")
-    # # print(f"  🟡  Between 20% and 50%  : {len(unlikely_conflicts)}")
-    # print(f"{'═' * 52}\n")
+    # Send e-mail
+    send_summary(gmail, SUMMARY_RECIPIENT, lines, lines[0])
 
-    # if potential_conflicts:
-    #     print("🔴  POTENTIAL GIG CONFLICTS\n")
-    #     _print_events(potential_conflicts)
-    # else:
-    #     print("✅ No potential conflicts — all uncovered events look fine.\n")
-
-    # if SUMMARY_RECIPIENT:
-    #     send_summary(gmail, SUMMARY_RECIPIENT, len(personal_events), covered_count, potential_conflicts, unlikely_conflicts)
+    # Print to console
+    for line in lines:
+        print(line)
 
 
 if __name__ == "__main__":
