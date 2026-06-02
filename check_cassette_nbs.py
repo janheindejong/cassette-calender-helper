@@ -35,7 +35,6 @@ SCOPES = [
 
 
 # ── Logging ────────────────────────────────────────────────────────────
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
@@ -47,15 +46,14 @@ class NbsClassification(Enum):
     HIGH = 1
     MEDIUM = 2
     LOW = 3
-    BLOCKED = 4
+    FLAGGED = 4
     UNKNOWN = 5
 
 
-class BelowThreshold:
-    pass
+class BelowThreshold: ...
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class NbsAssessment:
     score: float
     reason: str
@@ -71,61 +69,24 @@ class CalendarEvent:
     flagged_nbs: bool | None = None
     nbs_assessment: None | BelowThreshold | NbsAssessment = None
 
-    def is_covered_by_nbs(
-        self, nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]]
-    ) -> bool:
-        return any(
-            self.start < nb_end and self.end > nb_start
-            for nb_start, nb_end in nbs_intervals
-        )
-
-    def with_flag_updated(
-        self, nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]]
-    ) -> "CalendarEvent":
-        return dataclasses.replace(
-            self, flagged_nbs=self.is_covered_by_nbs(nbs_intervals)
-        )
-
-    def with_nbs_assessment_updated(
-        self, assessment: NbsAssessment | BelowThreshold | None
-    ) -> "CalendarEvent":
-        return dataclasses.replace(self, nbs_assessment=assessment)
-
     @property
     def classification(self) -> NbsClassification:
-        return self._classify_event()[0]
-
-    @property
-    def badge(self) -> str:
-        return self._classify_event()[1]
-
-    @property
-    def classification_string(self) -> str:
-        return self._classify_event()[2]
-
-    def _classify_event(self) -> tuple[NbsClassification, str, str]:
         if self.flagged_nbs:
-            return NbsClassification.BLOCKED, "🔵", "Covered by NBS"
+            return NbsClassification.FLAGGED
         match self.nbs_assessment:
-            case NbsAssessment(score=score, reason=reason) if (
-                score >= HIGH_NBS_THRESHOLD
-            ):
-                return NbsClassification.HIGH, "🔴", f"{reason} ({score:.0%})"
-            case NbsAssessment(score=score, reason=reason) if (
-                score >= MEDIUM_NBS_THRESHOLD
-            ):
-                return NbsClassification.MEDIUM, "🟡", f"{reason} ({score:.0%})"
-            case NbsAssessment(score=score, reason=reason):
-                return NbsClassification.LOW, "🟢", f"{reason} ({score:.0%})"
+            case NbsAssessment(score=score) if score >= HIGH_NBS_THRESHOLD:
+                return NbsClassification.HIGH
+            case NbsAssessment(score=score) if score >= MEDIUM_NBS_THRESHOLD:
+                return NbsClassification.MEDIUM
+            case NbsAssessment():
+                return NbsClassification.LOW
             case BelowThreshold():
-                return NbsClassification.LOW, "🟢", f"(<{MEDIUM_NBS_THRESHOLD:.0%})"
+                return NbsClassification.LOW
             case _:
-                return NbsClassification.UNKNOWN, "⚪", "Unknown conflict status"
+                return NbsClassification.UNKNOWN
 
 
 # ── Google Calender ──────────────────────────────────────────────────────────────
-
-
 def get_credentials() -> Credentials:
     creds = None
     if os.path.exists(TOKEN_FILE):
@@ -152,31 +113,23 @@ def get_calendar_id(service, name: str) -> str:
     return res
 
 
-global _event_id_counter
-_event_id_counter = 0
-
-
-def parse_event(item: dict) -> CalendarEvent:
+def parse_event(item: dict, event_id: int) -> CalendarEvent:
     def parse_dt(val: str) -> datetime.datetime:
         dt = datetime.datetime.fromisoformat(val)
         if isinstance(dt, datetime.datetime):
-            return dt.astimezone(zoneinfo.ZoneInfo("Europe/Amsterdam")).replace(
-                tzinfo=None
-            )
+            return dt.astimezone(zoneinfo.ZoneInfo("Europe/Amsterdam")).replace(tzinfo=None)
         return datetime.datetime(dt.year, dt.month, dt.day)  # midnight, no tz
 
     start_raw = item["start"].get("dateTime") or item["start"]["date"]
     end_raw = item["end"].get("dateTime") or item["end"]["date"]
 
-    global _event_id_counter
     event = CalendarEvent(
-        id=_event_id_counter,
+        id=event_id,
         start=parse_dt(start_raw),
         end=parse_dt(end_raw),
         summary=item.get("summary", "NO TITLE"),
         location=item.get("location"),
     )
-    _event_id_counter += 1
     return event
 
 
@@ -195,13 +148,35 @@ def fetch_events(
         .execute()
         .get("items", [])
     )
-    return [parse_event(event) for event in items]
+    return [parse_event(event, i) for i, event in enumerate(items)]
+
+
+# ── Flagging ─────────────────────────────────────────────────────────────
+def update_nbs_flag(events: list[CalendarEvent], cassette_events: list[CalendarEvent]) -> None:
+    nbs_intervals = extract_nbs_intervals(cassette_events)
+    for event in events:
+        if is_covered_by_nbs(event, nbs_intervals):
+            event.flagged_nbs = True
+
+
+def is_covered_by_nbs(
+    event: CalendarEvent,
+    nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]],
+) -> bool:
+    return any(event.start < t2 and event.end > t1 for t1, t2 in nbs_intervals)
+
+
+def extract_nbs_intervals(cassette_events):
+    nbs_intervals = [
+        (e.start, e.end)
+        for e in cassette_events
+        if e.summary.lower().strip() == NBS_MARKER.lower().strip()
+    ]
+    return nbs_intervals
 
 
 # ── Assessment ───────────────────────────────────────────────────────────────────────
-
-
-class Assessment(pydantic.BaseModel):
+class LlmAssessment(pydantic.BaseModel):
     id: int
     conflict_score: float
     reason: str
@@ -219,92 +194,88 @@ def _build_prompt(events: list[CalendarEvent]) -> str:
         return f.read().replace("<<EVENTS>>", "\n".join(event_lines))
 
 
-def assess_events_with_llm(events: list[CalendarEvent]) -> list[CalendarEvent]:
+def assess_events_with_llm(events: list[CalendarEvent]) -> None:
     client = anthropic.Anthropic()
     prompt = _build_prompt(events)
     logger.debug(prompt)
     response = client.messages.parse(
-        model="claude-sonnet-4-6",
+        model=CLAUDE_MODEL,
         max_tokens=4096 * 2,
         messages=[{"role": "user", "content": prompt}],
-        output_format=list[Assessment],
+        output_format=list[LlmAssessment],
     )
     assessments = response.parsed_output
     assert assessments is not None
     for a in assessments:
         logger.debug(a.model_dump())
     assessment_map = {a.id: a for a in assessments}
-    assessed_events = []
     for e in events:
         a = assessment_map.get(e.id)
         assessment = (
-            NbsAssessment(score=a.conflict_score, reason=a.reason)
-            if a
-            else BelowThreshold()
+            NbsAssessment(score=a.conflict_score, reason=a.reason) if a else BelowThreshold()
         )
-        assessed_events.append(e.with_nbs_assessment_updated(assessment))
-    return assessed_events
-
-
-# ── Flagging ─────────────────────────────────────────────────────────────
-def check_if_flagged(
-    personal_events: list[CalendarEvent],
-    nbs_intervals: list[tuple[datetime.datetime, datetime.datetime]],
-) -> list[CalendarEvent]:
-    personal_events = [e.with_flag_updated(nbs_intervals) for e in personal_events]
-    return personal_events
-
-
-def extract_nbs_intervals(cassette_events):
-    nbs_intervals = [
-        (e.start, e.end)
-        for e in cassette_events
-        if e.summary.lower().strip() == NBS_MARKER.lower().strip()
-    ]
-    return nbs_intervals
+        e.nbs_assessment = assessment
 
 
 # ── Presentation ─────────────────────────────────────────────────────────────
+ICONS = {
+    NbsClassification.HIGH: "🔴",
+    NbsClassification.MEDIUM: "🟡",
+    NbsClassification.LOW: "🟢",
+    NbsClassification.FLAGGED: "🔵",
+    NbsClassification.UNKNOWN: "⚪",
+}
+
+
+def generate_report(events: list[CalendarEvent]) -> list[str]:
+    return summary_strings(events) + [""] + event_strings(events)
+
+
 def summary_strings(events: list[CalendarEvent]) -> list[str]:
     today = datetime.date.today().strftime("%d %b %Y")
     body_parts = [
         f"Gig conflict audit — {today}",
         "",
         f"Events: {len(events)}",
-        f"🔴  High probability conflicts: {len([e for e in events if e.classification is NbsClassification.HIGH])}",
-        f"🟡  Medium probability conflicts: {len([e for e in events if e.classification is NbsClassification.MEDIUM])}",
-        f"🟢  Low probability conflicts: {len([e for e in events if e.classification is NbsClassification.LOW])}",
-        f"🔵  Flagged with NBS: {len([e for e in events if e.classification is NbsClassification.BLOCKED])}",
-        f"⚪  Unknown: {len([e for e in events if e.classification is NbsClassification.UNKNOWN])}",
+        f"{ICONS[NbsClassification.HIGH]}  High probability conflicts: {len([e for e in events if e.classification is NbsClassification.HIGH])}",
+        f"{ICONS[NbsClassification.MEDIUM]}  Medium probability conflicts: {len([e for e in events if e.classification is NbsClassification.MEDIUM])}",
+        f"{ICONS[NbsClassification.LOW]}  Low probability conflicts: {len([e for e in events if e.classification is NbsClassification.LOW])}",
+        f"{ICONS[NbsClassification.FLAGGED]}  Flagged with NBS: {len([e for e in events if e.classification is NbsClassification.FLAGGED])}",
+        f"{ICONS[NbsClassification.UNKNOWN]}  Unknown: {len([e for e in events if e.classification is NbsClassification.UNKNOWN])}",
     ]
     return body_parts
 
 
-def group_and_sort_events(events: list[CalendarEvent]) -> dict[NbsClassification, list[CalendarEvent]]:
+def group_and_sort_events(
+    events: list[CalendarEvent],
+) -> dict[NbsClassification, list[CalendarEvent]]:
     grouped: dict[NbsClassification, list[CalendarEvent]] = {}
     for event in sorted(events, key=lambda c: (c.classification.value, c.start)):
         key = event.classification
         grouped.setdefault(key, []).append(event)
     return grouped
- 
-
-ICONS = {
-    NbsClassification.HIGH: "🔴",
-    NbsClassification.MEDIUM: "🟡",
-    NbsClassification.LOW: "🟢",
-    NbsClassification.BLOCKED: "🔵",
-    NbsClassification.UNKNOWN: "⚪",
-}
 
 
 def event_string(event: CalendarEvent) -> str:
     location_str = f" - 📍 {event.location}" if event.location else ""
-    same_day = event.start.date() == event.end.date()
-    if same_day:
+    if event.start.date() == event.end.date():
         time_str = f"{event.start:%a %d %b %Y} {event.start:%H:%M}–{event.end:%H:%M}"
     else:
         time_str = f"{event.start:%a %d %b %Y} {event.start:%H:%M} – {event.end:%a %d %b %Y} {event.end:%H:%M}"
-    return f"{ICONS[event.classification]} {time_str} - {event.summary.strip()}{location_str} - {event.classification_string}"
+    match event.classification:
+        case NbsClassification.HIGH | NbsClassification.MEDIUM | NbsClassification.LOW:
+            match event.nbs_assessment:
+                case NbsAssessment(reason=reason, score=score):
+                    classification_str = f"{reason} ({score:.0%})"
+                case BelowThreshold():
+                    classification_str = f"(<{MEDIUM_NBS_THRESHOLD:.0%})"
+                case None:
+                    raise ValueError("Expected NbsAssessment or BelowThreshold for assessed event")
+        case NbsClassification.FLAGGED:
+            classification_str = "Flagged with NBS"
+        case NbsClassification.UNKNOWN:
+            classification_str = "No assessment available"
+    return f"{ICONS[event.classification]} {time_str} - {event.summary.strip()}{location_str} - {classification_str}"
 
 
 def event_strings(events: list[CalendarEvent]) -> list[str]:
@@ -336,38 +307,34 @@ def send_summary(
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-
-
 def main() -> None:
     creds = get_credentials()
     service = build("calendar", "v3", credentials=creds)
     gmail = build("gmail", "v1", credentials=creds)
 
-    now = datetime.datetime.now()
-    horizon = now + datetime.timedelta(days=365)
+    # Get calendar ID
     cassette_id = get_calendar_id(service, CASSETTE_CALENDAR_NAME)
 
     # Fetch events
+    now = datetime.datetime.now()
+    horizon = now + datetime.timedelta(days=365)
     events = fetch_events(service, "primary", now, horizon)
     cassette_events = fetch_events(service, cassette_id, now, horizon)
 
     # Check against NBS intervals
-    nbs_intervals = extract_nbs_intervals(cassette_events)
-    events = check_if_flagged(events, nbs_intervals)
+    update_nbs_flag(events, cassette_events)
 
     # Assess uncovered events with LLM
-    events_not_flagged = [e for e in events if not e.flagged_nbs]
-    events_flagged = [e for e in events if e.flagged_nbs]
-    events = assess_events_with_llm(events_not_flagged) + events_flagged
+    assess_events_with_llm([e for e in events if not e.flagged_nbs])
 
     # Create output lines
-    lines = summary_strings(events) + [""] + event_strings(events)
+    report = generate_report(events)
 
     # Send e-mail
-    send_summary(gmail, SUMMARY_RECIPIENT, lines, lines[0])
+    send_summary(gmail, SUMMARY_RECIPIENT, report, report[0])
 
     # Print to console
-    for line in lines:
+    for line in report:
         print(line)
 
 
