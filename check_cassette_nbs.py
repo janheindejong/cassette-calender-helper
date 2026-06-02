@@ -28,10 +28,6 @@ HIGH_NBS_THRESHOLD = 0.5
 # Fixed configuration
 CASSETTE_CALENDAR_NAME = "Cassette Band Intern"
 NBS_MARKER = "JH NBS"
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-]
 
 
 # ── Logging ────────────────────────────────────────────────────────────
@@ -86,7 +82,13 @@ class CalendarEvent:
                 return NbsClassification.UNKNOWN
 
 
-# ── Google Calender ──────────────────────────────────────────────────────────────
+# ── Google Credentials ──────────────────────────────────────────────────────────────
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+
+
 def get_credentials() -> Credentials:
     creds = None
     if os.path.exists(TOKEN_FILE):
@@ -103,6 +105,7 @@ def get_credentials() -> Credentials:
     return creds
 
 
+# ── Google Calendar ──────────────────────────────────────────────────────────────
 def get_calendar_id(service, name: str) -> str:
     cals = service.calendarList().list().execute().get("items", [])
     calendars = {cal.get("summary", "").strip().lower(): cal["id"] for cal in cals}
@@ -182,18 +185,6 @@ class LlmAssessment(pydantic.BaseModel):
     reason: str
 
 
-def _build_prompt(events: list[CalendarEvent]) -> str:
-    event_lines = []
-    for e in events:
-        event_lines.append(
-            f"{e.id}. [{e.start.isoformat()}-{e.end.isoformat()}]: "
-            f'"{e.summary}"'
-            f"{f' at {e.location}' if e.location else ''}"
-        )
-    with open("prompts/base.txt") as f:
-        return f.read().replace("<<EVENTS>>", "\n".join(event_lines))
-
-
 def assess_events_with_llm(events: list[CalendarEvent]) -> None:
     client = anthropic.Anthropic()
     prompt = _build_prompt(events)
@@ -215,6 +206,18 @@ def assess_events_with_llm(events: list[CalendarEvent]) -> None:
             NbsAssessment(score=a.conflict_score, reason=a.reason) if a else BelowThreshold()
         )
         e.nbs_assessment = assessment
+
+
+def _build_prompt(events: list[CalendarEvent]) -> str:
+    event_lines = []
+    for e in events:
+        event_lines.append(
+            f"{e.id}. [{e.start.isoformat()}-{e.end.isoformat()}]: "
+            f'"{e.summary}"'
+            f"{f' at {e.location}' if e.location else ''}"
+        )
+    with open("prompts/base.txt") as f:
+        return f.read().replace("<<EVENTS>>", "\n".join(event_lines))
 
 
 # ── Presentation ─────────────────────────────────────────────────────────────
@@ -246,17 +249,7 @@ def summary_strings(events: list[CalendarEvent]) -> list[str]:
     return body_parts
 
 
-def group_and_sort_events(
-    events: list[CalendarEvent],
-) -> dict[NbsClassification, list[CalendarEvent]]:
-    grouped: dict[NbsClassification, list[CalendarEvent]] = {}
-    for event in sorted(events, key=lambda c: (c.classification.value, c.start)):
-        key = event.classification
-        grouped.setdefault(key, []).append(event)
-    return grouped
-
-
-def event_string(event: CalendarEvent) -> str:
+def event_line(event: CalendarEvent) -> str:
     location_str = f" - 📍 {event.location}" if event.location else ""
     if event.start.date() == event.end.date():
         time_str = f"{event.start:%a %d %b %Y} {event.start:%H:%M}–{event.end:%H:%M}"
@@ -280,12 +273,22 @@ def event_string(event: CalendarEvent) -> str:
 
 def event_strings(events: list[CalendarEvent]) -> list[str]:
     output = []
-    for group, events in group_and_sort_events(events).items():
+    for group, events in _group_and_sort_events(events).items():
         output.append("─" * 20 + f" {group.name} ({len(events)} events) " + "─" * 20)
         for event in events:
-            output.append(f"{event_string(event)}")
+            output.append(f"{event_line(event)}")
         output.append("")
     return output
+
+
+def _group_and_sort_events(
+    events: list[CalendarEvent],
+) -> dict[NbsClassification, list[CalendarEvent]]:
+    grouped: dict[NbsClassification, list[CalendarEvent]] = {}
+    for event in sorted(events, key=lambda c: (c.classification.value, c.start)):
+        key = event.classification
+        grouped.setdefault(key, []).append(event)
+    return grouped
 
 
 # ── Gmail ──────────────────────────────────────────────────────────────
