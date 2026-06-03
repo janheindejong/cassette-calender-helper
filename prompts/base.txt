@@ -8,7 +8,7 @@ Rules:
 
 Output: 
 - For all the events, give me a likelihood between 0 and 1 that it will prevent me from playing a gig. 
-- Return only events with score above 0.2
+- Return only events with score above <<MEDIUM_NBS_THRESHOLD>>
 
 Events:
 <<EVENTS>>

@@ -215,7 +215,7 @@ def _build_prompt(events: list[CalendarEvent]) -> str:
             f"{f' at {e.location}' if e.location else ''}"
         )
     with open("prompts/base.txt") as f:
-        return f.read().replace("<<EVENTS>>", "\n".join(event_lines))
+        return f.read().replace("<<EVENTS>>", "\n".join(event_lines)).replace("<<MEDIUM_NBS_THRESHOLD>>", f"{MEDIUM_NBS_THRESHOLD:.0%}")
 
 
 # ── Presentation ─────────────────────────────────────────────────────────────
