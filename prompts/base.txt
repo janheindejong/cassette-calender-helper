@@ -8,7 +8,6 @@ Rules:
 
 Output: 
 - For all the events, give me a likelihood between 0 and 1 that it will prevent me from playing a gig. 
-- Return JSON-parsable output (not Markdown), in the form [{"id": 1, "conflict_score": 0.5, "reason": "this might be a problem because XYZ"}]
 - Return only events with score above 0.2
 
 Events:

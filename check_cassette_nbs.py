@@ -15,7 +15,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-dotenv.load_dotenv()
 
 # Configuration
 CREDENTIALS_FILE = "credentials.json"
@@ -35,9 +34,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 
+
 # ── Models ────────────────────────────────────────────────────────────
-
-
 class NbsClassification(Enum):
     HIGH = 1
     MEDIUM = 2
@@ -311,6 +309,8 @@ def send_summary(
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
+    dotenv.load_dotenv()
+
     creds = get_credentials()
     service = build("calendar", "v3", credentials=creds)
     gmail = build("gmail", "v1", credentials=creds)
